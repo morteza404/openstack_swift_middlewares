@@ -1,7 +1,7 @@
 import json
 from swift.common.wsgi import make_subrequest
+from swift.common.swob import Request, Response
 from swift.common.utils import get_logger, split_path
-from swift.common.swob import Request, Response, HTTPInternalServerError
 
 
 class ListContainerACLMiddleware:
@@ -11,51 +11,53 @@ class ListContainerACLMiddleware:
 
     def __call__(self, env, start_response):
         req = Request(env)
+        status_code = [None]
+
+        def custom_start_response(status, response_headers, *args):
+            status_code[0] = status.split(" ")[0] if status else None
+            return start_response(status, response_headers)
+
+        response = self.app(env, custom_start_response)
+
         _, account, _, _ = split_path(env["PATH_INFO"], 1, 4, True)
-        if req.method == "GET" and len(req.path.split("/")) < 4 and account:
-            try:
-                containers = self._get_containers_with_acls(env, env["PATH_INFO"])
 
-                resp = Response(
-                    request=req,
-                    body=json.dumps(containers),
-                    content_type="application/json",
-                )
-                return resp(env, start_response)
+        if (
+            req.method == "GET"
+            and len(req.path.split("/")) < 4
+            and account
+            and (int(status_code[0]) // 100 == 2)
+        ):
+            containers = []
+            for data in response:
+                json_data = json.loads(data.decode("utf-8"))
+                for container in json_data:
+                    sub_req_meta = make_subrequest(
+                        env,
+                        path=env["PATH_INFO"] + f"/{container['name']}",
+                        method="HEAD",
+                    )
+                    resp_meta = sub_req_meta.get_response(self.app)
 
-            except Exception as e:
-                message = f"Error retrieving containers or ACLs: {str(e)}"
-                self.logger.error(message)
-                ultimate_response = HTTPInternalServerError(body=message, request=req)
-                return ultimate_response(env, start_response)
+                    if resp_meta.status_int // 100 == 2:
+                        read_acl = resp_meta.headers.get("X-Container-Read", "None")
+                        write_acl = resp_meta.headers.get("X-Container-Write", "None")
+                        container["read_acl"] = read_acl
+                        container["write_acl"] = write_acl
+                        containers.append(container)
+                    else:
+                        ultimate_response = Response(
+                            body=resp.body.decode("utf-8"), status_int=resp.status_int
+                        )
+                        return ultimate_response(env, start_response)
 
-        return self.app(env, start_response)
-
-    def _get_containers_with_acls(self, env, path):
-        sub_req = make_subrequest(env, path=path, method="GET")
-        resp = sub_req.get_response(self.app)
-
-        if resp.status_int != 200:
-            self.logger.error(f"Error fetching containers: {resp.body.decode('utf-8')}")
-            raise Exception(
-                f"Error fetching containers: {resp.status_int} {resp.body.decode('utf-8')}"
+            resp = Response(
+                request=req,
+                body=json.dumps(containers),
+                content_type="application/json",
             )
+            return resp(env, start_response)
 
-        containers = json.loads(resp.body.decode("utf-8"))
-
-        for container in containers:
-            sub_req_meta = make_subrequest(
-                env, path=path + f"/{container['name']}", method="HEAD"
-            )
-            resp_meta = sub_req_meta.get_response(self.app)
-
-            if resp_meta.status_int // 100 == 2:
-                read_acl = resp_meta.headers.get("X-Container-Read", "None")
-                write_acl = resp_meta.headers.get("X-Container-Write", "None")
-                container["read_acl"] = read_acl
-                container["write_acl"] = write_acl
-
-        return containers
+        return response
 
 
 def filter_factory(global_conf, **local_conf):
