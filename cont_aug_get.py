@@ -1,8 +1,7 @@
 import json
-from urllib.parse import quote
-from swift.common.utils import get_logger
+from swift.common.swob import Request
 from swift.common.wsgi import make_subrequest
-from swift.common.swob import Request, Response
+from swift.common.utils import get_logger, split_path
 
 
 class ContAugGetMiddleware:
@@ -12,51 +11,33 @@ class ContAugGetMiddleware:
 
     def __call__(self, env, start_response):
         req = Request(env)
-        if req.method == "GET" and "X-List-Object-Metadata" in req.headers:
-            try:
-                objects = self.get_container_objects(env, env["PATH_INFO"])
-                data_string = objects.decode("utf-8")
-                data_list = json.loads(data_string)
-                indices = {v["name"]:i for i,v in enumerate(data_list) if "name" in v}
-                for obj in data_list:
-                    if "name" in obj:
-                        obj_metadata = self.get_object_metadata(
-                            env, env["PATH_INFO"] + f"/{obj['name']}"
-                        )
-                        data_list[indices[obj["name"]]].update(obj_metadata)
-                resp = Response(
-                    request=req,
-                    body=json.dumps(data_list, ensure_ascii=False),
-                    content_type="application/json",
-                )
-                return resp(env, start_response)
-            except Exception as e:
-                self.logger.error(f"Error listing object metadata: {e}")
-                return self.app(env, start_response)
-        else:
+        try:
+            _, _, container, _ = split_path(env["PATH_INFO"], 0, 4, True)
+        except ValueError:
             return self.app(env, start_response)
+        if req.method == "GET" and len(req.path.split("/")) < 5 and container:
+            resp = req.get_response(self.app)
+            json_data = json.loads(resp.body.decode("utf-8"))
+            for object in json_data:
+                object_meta = self.get_object_metadata(req, object["name"])
+                object.update(object_meta)
 
-    def get_container_objects(self, env, path):
-        subreq = make_subrequest(env, method="GET", path=path)
-        resp = subreq.get_response(self.app)
+            resp.body = json.dumps(json_data).encode("utf-8")
+            resp.content_length = len(resp.body)
+            return resp(env, start_response)
 
-        if resp.status_int // 100 == 2:
-            objects = resp.body
-            return objects
-        else:
-            resp.app_iter.close()
-            return []
-        
-    def get_object_metadata(self, env, path):
-        encoded_path = quote(path)
-        subreq = make_subrequest(env, method="HEAD", path=encoded_path)
+        return self.app(env, start_response)
+
+    def get_object_metadata(self, req, object_name):
+        subreq = make_subrequest(
+            req.environ, method="HEAD", path=req.path_info + "/" + object_name
+        )
         resp = subreq.get_response(self.app)
 
         if resp.status_int // 100 == 2:
             return resp.headers
-        else:
-            resp.app_iter.close()
-            return {}       
+
+        return {}
 
 
 def filter_factory(global_conf, **local_conf):
