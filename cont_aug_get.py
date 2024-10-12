@@ -5,10 +5,10 @@ from swift.common.wsgi import make_subrequest
 from swift.common.swob import Request, Response
 
 
-class ListObjectMetadataMiddleware:
+class ContAugGetMiddleware:
     def __init__(self, app, conf):
         self.app = app
-        self.logger = get_logger(conf, log_route="list_object_metadata")
+        self.logger = get_logger(conf, log_route="cont_aug_get")
 
     def __call__(self, env, start_response):
         req = Request(env)
@@ -63,7 +63,7 @@ def filter_factory(global_conf, **local_conf):
     conf = global_conf.copy()
     conf.update(local_conf)
 
-    def list_object_metadata_filter(app):
-        return ListObjectMetadataMiddleware(app, conf)
+    def cont_aug_get_filter(app):
+        return ContAugGetMiddleware(app, conf)
 
-    return list_object_metadata_filter
+    return cont_aug_get_filter
