@@ -1,5 +1,6 @@
 import json
 from swift.common.swob import Request
+from swift.common.http import is_success
 from swift.common.wsgi import make_subrequest
 from swift.common.utils import get_logger, split_path
 
@@ -34,7 +35,7 @@ class ContAugGetMiddleware:
         )
         resp = subreq.get_response(self.app)
 
-        if resp.status_int // 100 == 2:
+        if is_success(resp.status_int):
             return resp.headers
 
         return {}
