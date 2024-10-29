@@ -1,8 +1,14 @@
 import json
-from swift.common.swob import Request
 from swift.common.http import is_success
 from swift.common.wsgi import make_subrequest
+from swift.common.swob import Request, Response
 from swift.common.utils import get_logger, split_path
+
+
+class CustomException(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
 
 
 class ContAugGetMiddleware:
@@ -17,28 +23,35 @@ class ContAugGetMiddleware:
         except ValueError:
             return self.app(env, start_response)
         if req.method == "GET" and len(req.path.split("/")) < 5 and container:
-            resp = req.get_response(self.app)
-            json_data = json.loads(resp.body.decode("utf-8"))
-            for object in json_data:
-                object_meta = self.get_object_metadata(req, object["name"])
-                object.update(object_meta)
+            try:
+                resp = req.get_response(self.app)
+                json_data = json.loads(resp.body.decode("utf-8"))
+                for object in json_data:
+                    object_meta = self.get_object_metadata(req, object["name"])
+                    object.update(object_meta)
 
-            resp.body = json.dumps(json_data).encode("utf-8")
-            resp.content_length = len(resp.body)
-            return resp(env, start_response)
+                resp.body = json.dumps(json_data).encode("utf-8")
+                resp.content_length = len(resp.body)
+                return resp(env, start_response)
+            except CustomException as exception:
+                return Response(
+                    body=str(exception), status=exception.status, request=req
+                )(env, start_response)
 
         return self.app(env, start_response)
 
     def get_object_metadata(self, req, object_name):
         subreq = make_subrequest(
-            req.environ, method="HEAD", path=req.path_info + "/" + object_name
+            req.environ, method="HEAD", path=f"{req.path_info}/{object_name}"
         )
         resp = subreq.get_response(self.app)
 
-        if is_success(resp.status_int):
-            return resp.headers
+        if not is_success(resp.status_int):
+            message = f"ERROR MIDDLEWARE CONT_AUG_GET :: {resp.status} {subreq.method} {subreq.path}"
+            self.logger.error(message)
+            raise CustomException(resp.status, resp.body.decode())
 
-        return {}
+        return resp.headers
 
 
 def filter_factory(global_conf, **local_conf):
